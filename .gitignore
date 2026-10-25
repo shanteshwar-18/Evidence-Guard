@@ -1,0 +1,72 @@
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+env/
+.eggs/
+*.so
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+htmlcov/
+.coverage
+coverage.xml
+
+# ── Node / Frontend ───────────────────────────────────────────────────────────
+node_modules/
+.next/
+out/
+dist/
+*.tsbuildinfo
+
+# ── Go (chaincode) ────────────────────────────────────────────────────────────
+vendor/
+*.test
+
+# ── Secrets and credentials ────────────────────────────────────────────────────
+# NEVER commit these
+.env
+*.env.local
+*.env.*.local
+*.pem
+*.key
+*.p12
+*.pfx
+wallet/
+keystore/
+*.secret
+*credentials*
+
+# ── Data – never commit raw evidence or public datasets ───────────────────────
+data/public/
+data/raw/
+
+# ── Docker / generated artifacts ──────────────────────────────────────────────
+infra/fabric/crypto-config/
+infra/fabric/channel-artifacts/
+blockchain/network/crypto-config/
+blockchain/network/channel-artifacts/
+
+# ── IDE and OS ────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# ── Logs ──────────────────────────────────────────────────────────────────────
+*.log
+logs/
+
+# ── Test reports ──────────────────────────────────────────────────────────────
+test-results/
+playwright-report/
+allure-results/

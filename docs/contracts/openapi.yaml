@@ -1,0 +1,891 @@
+openapi: "3.1.0"
+info:
+  title: Evidence Guard API
+  version: "0.1.0"
+  description: |
+    Blockchain-backed digital evidence management system with AI-assisted investigation.
+
+    **LIMITATION**: AI outputs are investigative leads, not findings.
+    Human review is mandatory before any AI result appears in a report.
+    This system supports but does not replace the BSA 2023 Section 63(4) certificate.
+
+  contact:
+    name: Evidence Guard Project Team
+
+servers:
+  - url: http://localhost:8000
+    description: Local development
+  - url: https://api.evidence-guard.local
+    description: Staging
+
+security:
+  - bearerAuth: []
+
+# ── Components ──────────────────────────────────────────────────────────────────
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    # ── Enums (frozen – see SIGNOFF.md) ──────────────────────────────────────
+    EvidenceStatus:
+      type: string
+      enum: [verified, under_review, flagged, failed_integrity]
+      description: "Evidence status (Appendix D vocabulary)"
+
+    AlertSeverity:
+      type: string
+      enum: [critical, high, medium, low]
+
+    CaseStatus:
+      type: string
+      enum: [active, under_review, resolved, closed, sealed]
+
+    CasePriority:
+      type: string
+      enum: [low, medium, high, critical]
+
+    RoleName:
+      type: string
+      enum: [admin, investigator, analyst, supervisor, viewer]
+
+    CustodyAction:
+      type: string
+      enum: [registered, transferred, accessed, verified, ai_analyzed, flagged, sealed, exported]
+
+    AIModule:
+      type: string
+      enum: [m1_classifier, m2_entities, m3_anomaly, m4_explain]
+
+    ReviewDecision:
+      type: string
+      enum: [accepted, rejected, pending]
+
+    # ── Auth ─────────────────────────────────────────────────────────────────
+    LoginRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username: { type: string }
+        password: { type: string, format: password }
+
+    MFARequest:
+      type: object
+      required: [temp_token, totp_code]
+      properties:
+        temp_token: { type: string }
+        totp_code: { type: string, pattern: "^[0-9]{6}$" }
+
+    TokenResponse:
+      type: object
+      properties:
+        access_token: { type: string }
+        token_type: { type: string, default: bearer }
+        expires_in: { type: integer, description: seconds }
+        role: { $ref: "#/components/schemas/RoleName" }
+
+    # ── Cases ─────────────────────────────────────────────────────────────────
+    CaseSummary:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        case_number: { type: string, example: "CYB-2025-014" }
+        title: { type: string }
+        status: { $ref: "#/components/schemas/CaseStatus" }
+        priority: { $ref: "#/components/schemas/CasePriority" }
+        lead_investigator: { type: string }
+        evidence_count: { type: integer }
+        created_at: { type: string, format: date-time }
+
+    CaseDetail:
+      allOf:
+        - $ref: "#/components/schemas/CaseSummary"
+        - type: object
+          properties:
+            description: { type: string }
+            sealed_at: { type: string, format: date-time, nullable: true }
+            updated_at: { type: string, format: date-time }
+
+    CreateCaseRequest:
+      type: object
+      required: [case_number, title, priority]
+      properties:
+        case_number: { type: string, pattern: "^[A-Z]{2,6}-[0-9]{4}-[0-9]{3,6}$" }
+        title: { type: string, minLength: 5, maxLength: 256 }
+        description: { type: string }
+        priority: { $ref: "#/components/schemas/CasePriority" }
+
+    # ── Evidence ──────────────────────────────────────────────────────────────
+    EvidenceSummary:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        case_id: { type: string, format: uuid }
+        file_name: { type: string }
+        file_size_bytes: { type: integer }
+        mime_type: { type: string }
+        sha256_hex: { type: string, pattern: "^[a-f0-9]{64}$" }
+        hash_algorithm: { type: string, default: "SHA-256" }
+        status: { $ref: "#/components/schemas/EvidenceStatus" }
+        collector: { type: string }
+        created_at: { type: string, format: date-time }
+
+    EvidenceDetail:
+      allOf:
+        - $ref: "#/components/schemas/EvidenceSummary"
+        - type: object
+          properties:
+            metadata_hash: { type: string }
+            acquisition_tool: { type: string, nullable: true }
+            acquisition_device: { type: string, nullable: true }
+            acquisition_time: { type: string, format: date-time, nullable: true }
+            ledger_tx_id: { type: string, nullable: true }
+            ledger_platform: { type: string, nullable: true }
+            notes: { type: string, nullable: true }
+
+    AcquisitionMetadata:
+      type: object
+      properties:
+        collector_username: { type: string }
+        acquisition_tool: { type: string }
+        acquisition_device: { type: string }
+        acquisition_time: { type: string, format: date-time }
+        notes: { type: string }
+
+    # ── Upload (chunked / resumable) ──────────────────────────────────────────
+    UploadInitRequest:
+      type: object
+      required: [case_id, file_name, file_size_bytes, mime_type]
+      properties:
+        case_id: { type: string, format: uuid }
+        file_name: { type: string }
+        file_size_bytes: { type: integer, minimum: 1, maximum: 2147483648 }
+        mime_type: { type: string }
+        metadata: { $ref: "#/components/schemas/AcquisitionMetadata" }
+
+    UploadInitResponse:
+      type: object
+      properties:
+        session_id: { type: string, format: uuid }
+        upload_url: { type: string }
+        part_size_bytes: { type: integer }
+        expires_at: { type: string, format: date-time }
+
+    UploadCompleteRequest:
+      type: object
+      required: [session_id, sha256_hex]
+      properties:
+        session_id: { type: string, format: uuid }
+        sha256_hex: { type: string, pattern: "^[a-f0-9]{64}$" }
+
+    # ── Custody ───────────────────────────────────────────────────────────────
+    CustodyEvent:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        evidence_id: { type: string, format: uuid }
+        action: { $ref: "#/components/schemas/CustodyAction" }
+        actor: { type: string }
+        from_actor: { type: string, nullable: true }
+        occurred_at: { type: string, format: date-time }
+        ledger_tx_id: { type: string, nullable: true }
+        event_hash: { type: string, nullable: true }
+
+    # ── AI Result Schemas (JSON contract with AI team) ─────────────────────────
+    ClassificationResult:
+      type: object
+      description: "M1 – phishing vs benign email classification"
+      required: [evidence_id, module, label, confidence, model_version, output_hash, hash_algorithm]
+      properties:
+        evidence_id: { type: string, format: uuid }
+        module: { type: string, enum: [m1_classifier] }
+        label: { type: string, enum: [phishing, benign] }
+        confidence: { type: number, minimum: 0, maximum: 1 }
+        top_features: { type: array, items: { type: string } }
+        model_version: { type: string }
+        output_hash: { type: string, pattern: "^[a-f0-9]{64}$" }
+        hash_algorithm: { type: string, default: "SHA-256" }
+        disclaimer: { type: string, default: "AI output is an investigative lead. Human review required." }
+
+    EntityList:
+      type: object
+      description: "M2 – named entity extraction"
+      required: [evidence_id, module, entities, model_version, output_hash, hash_algorithm]
+      properties:
+        evidence_id: { type: string, format: uuid }
+        module: { type: string, enum: [m2_entities] }
+        entities:
+          type: array
+          items:
+            type: object
+            properties:
+              text: { type: string }
+              label: { type: string, enum: [PERSON, ORG, IP, EMAIL, DOMAIN, PHONE, OTHER] }
+              start: { type: integer }
+              end: { type: integer }
+              confidence: { type: number }
+        model_version: { type: string }
+        output_hash: { type: string }
+        hash_algorithm: { type: string, default: "SHA-256" }
+
+    RelationshipGraph:
+      type: object
+      description: "M2 – entity relationship graph"
+      required: [case_id, nodes, edges, model_version, output_hash, hash_algorithm]
+      properties:
+        case_id: { type: string, format: uuid }
+        nodes:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: string }
+              label: { type: string }
+              type: { type: string }
+        edges:
+          type: array
+          items:
+            type: object
+            properties:
+              source: { type: string }
+              target: { type: string }
+              relationship: { type: string }
+              confidence: { type: number }
+        model_version: { type: string }
+        output_hash: { type: string }
+        hash_algorithm: { type: string, default: "SHA-256" }
+
+    AnomalyAlert:
+      type: object
+      description: "M3 – custody anomaly detection"
+      required: [evidence_id, module, severity, description, model_version, output_hash, hash_algorithm]
+      properties:
+        evidence_id: { type: string, format: uuid }
+        module: { type: string, enum: [m3_anomaly] }
+        severity: { $ref: "#/components/schemas/AlertSeverity" }
+        description: { type: string }
+        anomaly_score: { type: number }
+        detector_type: { type: string, enum: [rules, isolation_forest, hybrid] }
+        model_version: { type: string }
+        output_hash: { type: string }
+        hash_algorithm: { type: string, default: "SHA-256" }
+        disclaimer: { type: string, default: "AI output is an investigative lead. Human review required." }
+
+    Explanation:
+      type: object
+      description: "M4 – explainability output"
+      required: [ai_result_id, module, explanation_type, explanation_text, output_hash, hash_algorithm]
+      properties:
+        ai_result_id: { type: string, format: uuid }
+        module: { $ref: "#/components/schemas/AIModule" }
+        explanation_type: { type: string, enum: [lime, shap, feature_importance, rule_based] }
+        explanation_text: { type: string }
+        feature_weights:
+          type: array
+          items:
+            type: object
+            properties:
+              feature: { type: string }
+              weight: { type: number }
+        output_hash: { type: string }
+        hash_algorithm: { type: string, default: "SHA-256" }
+
+    AIProvenanceRecord:
+      type: object
+      description: "Anchored AI provenance for reproducibility (H4)"
+      properties:
+        ai_result_id: { type: string, format: uuid }
+        evidence_id: { type: string, format: uuid }
+        module: { $ref: "#/components/schemas/AIModule" }
+        model_version: { type: string }
+        output_hash: { type: string }
+        hash_algorithm: { type: string, default: "SHA-256" }
+        input_hash: { type: string }
+        model_artifact_hash: { type: string, nullable: true }
+        ledger_tx_id: { type: string }
+        anchored_at: { type: string, format: date-time }
+
+    # ── Common ────────────────────────────────────────────────────────────────
+    Error:
+      type: object
+      properties:
+        detail: { type: string }
+        code: { type: string }
+
+    PaginatedResponse:
+      type: object
+      properties:
+        items: { type: array, items: {} }
+        total: { type: integer }
+        page: { type: integer }
+        per_page: { type: integer }
+
+# ── Paths ─────────────────────────────────────────────────────────────────────
+paths:
+
+  # ── System ──────────────────────────────────────────────────────────────────
+  /health:
+    get:
+      operationId: health_check
+      tags: [system]
+      summary: Service health check
+      security: []
+      responses:
+        "200":
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, enum: [ok] }
+                  service: { type: string }
+                  version: { type: string }
+
+  # ── Auth ────────────────────────────────────────────────────────────────────
+  /api/v1/auth/login:
+    post:
+      operationId: login
+      tags: [auth]
+      summary: "Step 1: username + password"
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LoginRequest" }
+      responses:
+        "200":
+          description: MFA required – returns temp_token
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  temp_token: { type: string }
+                  mfa_required: { type: boolean }
+        "401":
+          description: Invalid credentials
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429":
+          description: Too many attempts (brute-force lockout)
+
+  /api/v1/auth/mfa:
+    post:
+      operationId: mfa_verify
+      tags: [auth]
+      summary: "Step 2: TOTP MFA verification"
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/MFARequest" }
+      responses:
+        "200":
+          description: Authentication complete
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TokenResponse" }
+        "401":
+          description: Invalid or expired TOTP code
+
+  /api/v1/auth/refresh:
+    post:
+      operationId: token_refresh
+      tags: [auth]
+      summary: Refresh access token
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TokenResponse" }
+
+  /api/v1/auth/logout:
+    post:
+      operationId: logout
+      tags: [auth]
+      summary: Invalidate tokens
+      responses:
+        "204": { description: Logged out }
+
+  # ── Cases ────────────────────────────────────────────────────────────────────
+  /api/v1/cases:
+    get:
+      operationId: list_cases
+      tags: [cases]
+      summary: List cases (paginated)
+      parameters:
+        - name: status
+          in: query
+          schema: { $ref: "#/components/schemas/CaseStatus" }
+        - name: priority
+          in: query
+          schema: { $ref: "#/components/schemas/CasePriority" }
+        - name: q
+          in: query
+          schema: { type: string }
+          description: Full-text search
+        - name: page
+          in: query
+          schema: { type: integer, default: 1 }
+        - name: per_page
+          in: query
+          schema: { type: integer, default: 20, maximum: 100 }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/PaginatedResponse"
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: "#/components/schemas/CaseSummary" }
+
+    post:
+      operationId: create_case
+      tags: [cases]
+      summary: Create a new case (investigator / admin)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateCaseRequest" }
+      responses:
+        "201":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CaseDetail" }
+
+  /api/v1/cases/{case_id}:
+    get:
+      operationId: get_case
+      tags: [cases]
+      parameters:
+        - name: case_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CaseDetail" }
+
+  /api/v1/cases/{case_id}/seal:
+    post:
+      operationId: seal_case
+      tags: [cases]
+      summary: Seal a case (supervisor / admin only)
+      parameters:
+        - name: case_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CaseDetail" }
+        "403":
+          description: Insufficient permissions
+
+  # ── Evidence ─────────────────────────────────────────────────────────────────
+  /api/v1/evidence:
+    get:
+      operationId: list_evidence
+      tags: [evidence]
+      parameters:
+        - name: case_id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: status
+          in: query
+          schema: { $ref: "#/components/schemas/EvidenceStatus" }
+        - name: q
+          in: query
+          schema: { type: string }
+        - name: page
+          in: query
+          schema: { type: integer, default: 1 }
+        - name: per_page
+          in: query
+          schema: { type: integer, default: 20, maximum: 100 }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/PaginatedResponse"
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: "#/components/schemas/EvidenceSummary" }
+
+  /api/v1/evidence/{evidence_id}:
+    get:
+      operationId: get_evidence
+      tags: [evidence]
+      parameters:
+        - name: evidence_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EvidenceDetail" }
+
+  /api/v1/evidence/{evidence_id}/verify:
+    post:
+      operationId: verify_evidence
+      tags: [evidence]
+      summary: Re-verify SHA-256 against ledger record
+      parameters:
+        - name: evidence_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  evidence_id: { type: string }
+                  verified: { type: boolean }
+                  stored_hash: { type: string }
+                  computed_hash: { type: string }
+                  ledger_hash: { type: string }
+                  status: { $ref: "#/components/schemas/EvidenceStatus" }
+
+  /api/v1/evidence/{evidence_id}/custody:
+    get:
+      operationId: get_custody_chain
+      tags: [evidence]
+      summary: Full chain of custody
+      parameters:
+        - name: evidence_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  evidence_id: { type: string }
+                  events:
+                    type: array
+                    items: { $ref: "#/components/schemas/CustodyEvent" }
+
+  # ── Uploads ───────────────────────────────────────────────────────────────────
+  /api/v1/uploads/init:
+    post:
+      operationId: upload_init
+      tags: [uploads]
+      summary: Initiate a chunked upload session
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UploadInitRequest" }
+      responses:
+        "201":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UploadInitResponse" }
+
+  /api/v1/uploads/{session_id}/part:
+    put:
+      operationId: upload_part
+      tags: [uploads]
+      summary: Upload a single part (chunk)
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: part_number
+          in: query
+          required: true
+          schema: { type: integer, minimum: 1 }
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: { type: string, format: binary }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  part_number: { type: integer }
+                  bytes_received: { type: integer }
+
+  /api/v1/uploads/{session_id}/complete:
+    post:
+      operationId: upload_complete
+      tags: [uploads]
+      summary: Complete upload and register evidence
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UploadCompleteRequest" }
+      responses:
+        "201":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EvidenceDetail" }
+
+  /api/v1/uploads/{session_id}:
+    delete:
+      operationId: upload_abort
+      tags: [uploads]
+      summary: Abort and clean up an upload session
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "204": { description: Session aborted and cleaned up }
+
+  # ── AI ────────────────────────────────────────────────────────────────────────
+  /api/v1/ai/analyze/{evidence_id}:
+    post:
+      operationId: run_ai_analysis
+      tags: [ai]
+      summary: Trigger AI analysis (requires integrity gate to pass)
+      parameters:
+        - name: evidence_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                modules:
+                  type: array
+                  items: { $ref: "#/components/schemas/AIModule" }
+      responses:
+        "202":
+          description: Analysis queued
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  job_id: { type: string }
+                  status: { type: string }
+        "422":
+          description: Integrity gate failed – AI is blocked
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/v1/ai/results/{evidence_id}:
+    get:
+      operationId: get_ai_results
+      tags: [ai]
+      summary: Get AI results for an evidence item
+      parameters:
+        - name: evidence_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id: { type: string }
+                    module: { $ref: "#/components/schemas/AIModule" }
+                    review_decision: { $ref: "#/components/schemas/ReviewDecision" }
+                    result_json: { type: string }
+                    output_hash: { type: string }
+                    created_at: { type: string, format: date-time }
+
+  /api/v1/ai/review/{result_id}:
+    post:
+      operationId: review_ai_result
+      tags: [ai]
+      summary: Human accept or reject an AI result
+      parameters:
+        - name: result_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [decision]
+              properties:
+                decision: { $ref: "#/components/schemas/ReviewDecision" }
+                note: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  result_id: { type: string }
+                  decision: { $ref: "#/components/schemas/ReviewDecision" }
+                  reviewed_at: { type: string, format: date-time }
+
+  # ── Reports ────────────────────────────────────────────────────────────────────
+  /api/v1/reports/evidence/{evidence_id}:
+    post:
+      operationId: generate_evidence_report
+      tags: [reports]
+      summary: Generate evidence report (PDF) with Section 63(4) field mapping
+      parameters:
+        - name: evidence_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          content:
+            application/pdf:
+              schema: { type: string, format: binary }
+
+  /api/v1/reports/custody/{evidence_id}:
+    post:
+      operationId: generate_custody_report
+      tags: [reports]
+      summary: Generate chain of custody report (PDF)
+      parameters:
+        - name: evidence_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          content:
+            application/pdf:
+              schema: { type: string, format: binary }
+
+  /api/v1/reports/ai/{evidence_id}:
+    post:
+      operationId: generate_ai_report
+      tags: [reports]
+      summary: Generate AI analysis report (PDF); only accepted AI results included
+      parameters:
+        - name: evidence_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          content:
+            application/pdf:
+              schema: { type: string, format: binary }
+
+  /api/v1/reports/case/{case_id}:
+    post:
+      operationId: generate_case_summary_report
+      tags: [reports]
+      summary: Generate case summary report (PDF)
+      parameters:
+        - name: case_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          content:
+            application/pdf:
+              schema: { type: string, format: binary }
+
+  # ── Admin ────────────────────────────────────────────────────────────────────
+  /api/v1/admin/users:
+    get:
+      operationId: list_users
+      tags: [admin]
+      summary: List users (admin only)
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id: { type: string }
+                    username: { type: string }
+                    display_name: { type: string }
+                    role: { $ref: "#/components/schemas/RoleName" }
+                    is_active: { type: boolean }
+    post:
+      operationId: create_user
+      tags: [admin]
+      summary: Create user (admin only)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, display_name, email, role, password]
+              properties:
+                username: { type: string }
+                display_name: { type: string }
+                email: { type: string, format: email }
+                role: { $ref: "#/components/schemas/RoleName" }
+                password: { type: string, format: password, minLength: 12 }
+
+  /api/v1/admin/users/{user_id}:
+    patch:
+      operationId: update_user
+      tags: [admin]
+      parameters:
+        - name: user_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                is_active: { type: boolean }
+                role: { $ref: "#/components/schemas/RoleName" }
+      responses:
+        "200":
+          description: User updated

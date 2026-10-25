@@ -1,0 +1,130 @@
+# Evidence Guard – Role Permission Matrix
+# P1.3 – docs/contracts/permissions.yaml
+#
+# This is the single source of truth for permissions.
+# Used by: backend (dependency checks), chaincode (caller rules), frontend (UI visibility).
+# Changes must be approved by all four leads (see SIGNOFF.md).
+#
+# Roles: admin | investigator | analyst | supervisor | viewer
+# Non-human: ai-service (anchors AI results only) | system (automated integrity checks)
+#
+# Actions:
+#   register_evidence   – upload and register a new evidence item
+#   read_evidence       – view evidence metadata and download encrypted file
+#   transfer_evidence   – change evidence custody (transfer action)
+#   run_ai              – trigger an AI analysis module
+#   review_ai           – accept or reject an AI result (human review)
+#   seal_case           – seal a case (makes all evidence immutable)
+#   manage_users        – create, update, deactivate users and role assignments
+#   generate_report     – export PDF reports
+#   view_audit_log      – access the full access and custody log
+#
+# Legend: true = allowed, false = denied
+
+roles:
+  admin:
+    description: System administrator. Full access. Cannot run AI directly.
+    permissions:
+      register_evidence: true
+      read_evidence: true
+      transfer_evidence: true
+      run_ai: false          # admin manages, does not investigate
+      review_ai: true
+      seal_case: true
+      manage_users: true
+      generate_report: true
+      view_audit_log: true
+
+  investigator:
+    description: |
+      Leads investigations. Registers evidence, transfers custody,
+      runs AI, reviews AI results, and generates reports.
+    permissions:
+      register_evidence: true
+      read_evidence: true
+      transfer_evidence: true
+      run_ai: true
+      review_ai: true
+      seal_case: false        # only supervisor can seal
+      manage_users: false
+      generate_report: true
+      view_audit_log: true
+
+  analyst:
+    description: |
+      Reviews evidence and AI output. Can read evidence and run AI
+      but cannot register, transfer, seal, or manage users.
+    permissions:
+      register_evidence: false
+      read_evidence: true
+      transfer_evidence: false
+      run_ai: true
+      review_ai: true
+      seal_case: false
+      manage_users: false
+      generate_report: true
+      view_audit_log: false   # audit log is restricted to investigator+ and admin
+
+  supervisor:
+    description: |
+      Reviews cases, approves AI reviews, seals cases.
+      Can seal a case; cannot register or transfer evidence.
+    permissions:
+      register_evidence: false
+      read_evidence: true
+      transfer_evidence: false
+      run_ai: false
+      review_ai: true
+      seal_case: true
+      manage_users: false
+      generate_report: true
+      view_audit_log: true
+
+  viewer:
+    description: |
+      Read-only access to evidence metadata and reports.
+      Cannot perform any mutating action.
+    permissions:
+      register_evidence: false
+      read_evidence: true
+      transfer_evidence: false
+      run_ai: false
+      review_ai: false
+      seal_case: false
+      manage_users: false
+      generate_report: false
+      view_audit_log: false
+
+# Non-human service accounts (must stay separate from human users)
+service_accounts:
+  ai-service:
+    description: |
+      Automated AI pipeline service. Can only call anchor_ai_result on the ledger.
+      Cannot perform any human-facing action. Never interactive login.
+    permissions:
+      register_evidence: false
+      read_evidence: false      # gets a decrypted copy via integrity gate
+      transfer_evidence: false
+      run_ai: false             # AI runs internally; it does not call this endpoint
+      review_ai: false          # human review only
+      seal_case: false
+      manage_users: false
+      generate_report: false
+      view_audit_log: false
+      anchor_ai_result: true    # only ledger action allowed
+
+  system:
+    description: |
+      Automated system events: scheduled integrity checks, expiry, housekeeping.
+      Appears in logs as 'system' to distinguish automated from human actions.
+    permissions:
+      register_evidence: false
+      read_evidence: false
+      transfer_evidence: false
+      run_ai: false
+      review_ai: false
+      seal_case: false
+      manage_users: false
+      generate_report: false
+      view_audit_log: false
+      run_integrity_check: true  # only system action allowed

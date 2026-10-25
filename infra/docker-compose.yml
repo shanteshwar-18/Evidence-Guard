@@ -1,0 +1,97 @@
+version: "3.9"
+
+# Evidence Guard – infrastructure services
+# Start everything: make up
+# Stop everything:  make down
+# How to add Fabric: run blockchain/network/start-fabric.sh separately.
+# Ethereum fallback:  blockchain/network/start-eth.sh (Hardhat / Besu).
+
+services:
+
+  # ── Backend (FastAPI + uvicorn) ─────────────────────────────────────────────
+  backend:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    container_name: eg_backend
+    restart: unless-stopped
+    env_file:
+      - ../.env
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    volumes:
+      - ../backend:/app
+    networks:
+      - eg_net
+
+  # ── PostgreSQL ──────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: eg_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER:     ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB:       ${POSTGRES_DB}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - eg_net
+
+  # ── MinIO (object storage for encrypted evidence files) ─────────────────────
+  minio:
+    image: minio/minio:latest
+    container_name: eg_minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER:     ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    ports:
+      - "127.0.0.1:9000:9000"    # S3 API (bound to loopback only)
+      - "127.0.0.1:9001:9001"    # Web console (loopback only)
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - eg_net
+
+volumes:
+  pg_data:
+  minio_data:
+
+networks:
+  eg_net:
+    driver: bridge
+
+# ── Notes ────────────────────────────────────────────────────────────────────
+# Fabric test network:
+#   cd blockchain/network && ./start-fabric.sh
+#   The gateway service in blockchain/gateway/ connects via gRPC TLS.
+#
+# Private Ethereum fallback (break-glass Scenario 1):
+#   cd blockchain/network && ./start-eth.sh   (Hardhat / Ganache / Besu)
+#   The LedgerClient interface in backend/app/services/ledger_client.py
+#   does not change; only the implementation class is swapped.
